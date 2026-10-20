@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: iotfiy
+Version: 1.0.0
+Summary: IOTFIY MQTT gateway client for Raspberry Pi 3/4/5
+Author-email: Iotfiy Solutions <iotfiy.solution@gmail.com>
+Keywords: iot,mqtt,raspberry-pi,iotfiy
+Requires-Python: >=3.9
+Requires-Dist: paho-mqtt>=1.6.1
+Provides-Extra: gpio
+Requires-Dist: gpiozero; extra == "gpio"

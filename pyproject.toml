@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iotfiy"
+version = "1.0.0"
+description = "IOTFIY MQTT gateway client for Raspberry Pi 3/4/5"
+requires-python = ">=3.9"
+authors = [{ name = "Iotfiy Solutions", email = "iotfiy.solution@gmail.com" }]
+keywords = ["iot", "mqtt", "raspberry-pi", "iotfiy"]
+dependencies = [
+  "paho-mqtt>=1.6.1",
+]
+
+[project.optional-dependencies]
+gpio = ["gpiozero"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

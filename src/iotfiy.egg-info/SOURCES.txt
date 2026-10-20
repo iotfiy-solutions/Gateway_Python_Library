@@ -1,0 +1,12 @@
+pyproject.toml
+src/iotfiy/__init__.py
+src/iotfiy/client.py
+src/iotfiy/device_config.py
+src/iotfiy/receive.py
+src/iotfiy/ref.py
+src/iotfiy/send.py
+src/iotfiy.egg-info/PKG-INFO
+src/iotfiy.egg-info/SOURCES.txt
+src/iotfiy.egg-info/dependency_links.txt
+src/iotfiy.egg-info/requires.txt
+src/iotfiy.egg-info/top_level.txt

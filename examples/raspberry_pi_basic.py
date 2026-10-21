@@ -1,5 +1,5 @@
 """
-IOTFIY — Raspberry Pi Basic example (Pi 3 / 4 / 5)
+IOTFIY - Raspberry Pi Basic example (Pi 3 / 4 / 5)
 
 Install (from Python/ folder):
   pip install -e .
@@ -24,9 +24,8 @@ MQTT_SERVER = "YOUR_MQTT_HOST"  # e.g. "192.168.1.10" (no mqtt:// prefix)
 MQTT_CLIENT_ID = "rpi_client_1"
 DEVICE_ID = "device_rpi_1"
 MQTT_PORT = 1883
-# Optional auth:
-# MQTT_USER = ""
-# MQTT_PASS = ""
+MQTT_USER = "mqttuser"   # your MQTT username
+MQTT_PASS = ""           # your MQTT password (if any)
 
 sensor_value = Ref(0.0)
 control_value = Ref(0.0)
@@ -44,28 +43,28 @@ def main() -> None:
         MQTT_CLIENT_ID,
         DEVICE_ID,
         MQTT_PORT,
-        # MQTT_USER,
-        # MQTT_PASS,
+        MQTT_USER,
+        MQTT_PASS,
     )
     IOTFIY.enable_lwt(True)
 
     if not IOTFIY.check_and_reconnect_wifi():
-        print("Network to MQTT broker failed — will retry in loop")
+        print("Network to MQTT broker failed - will retry in loop")
     else:
         print("Network OK (MQTT host reachable)")
 
     IOTFIY.begin()
 
-    # Dashboard ← device (sensor / output)
+    # Dashboard <- device (sensor / output)
     IOTFIY.write("SensorValue", "float", "A0", sensor_value)
 
-    # Dashboard → device (control)
+    # Dashboard -> device (control)
     IOTFIY.read("ControlValue", "float", "Ctrl", control_value, 0, 100)
 
     if IOTFIY.reconnect_mqtt():
         print("MQTT connected")
     else:
-        print("MQTT connect failed — will retry in loop")
+        print("MQTT connect failed - will retry in loop")
 
     last_publish = 0.0
     demo = 0.0
@@ -81,7 +80,7 @@ def main() -> None:
         now = time.time()
         if now - last_publish >= PUBLISH_INTERVAL_S:
             last_publish = now
-            # Demo ramp 0–100 (replace with a real sensor read on Pi)
+            # Demo ramp 0-100 (replace with a real sensor read on Pi)
             demo = (demo + 3.0) % 100.0
             sensor_value.value = demo
             IOTFIY.launch()

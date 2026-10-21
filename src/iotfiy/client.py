@@ -1,4 +1,4 @@
-"""IOTFIY manager — Arduino IOTFIYManager API for Raspberry Pi."""
+"""IOTFIY manager - Arduino IOTFIYManager API for Raspberry Pi."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ class IOTFIYManager:
     def begin(self) -> None:
         if not self._config.is_valid():
             raise ValueError(
-                "IOTFIY config incomplete — set mqtt_server, client_id, device_id"
+                "IOTFIY config incomplete - set mqtt_server, client_id, device_id"
             )
 
         # paho-mqtt 2.x uses CallbackAPIVersion; 1.x does not.

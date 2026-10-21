@@ -84,7 +84,11 @@ class Send:
             "data": data,
         }
         published = self._publish(self._config.get_data_topic(), payload, retain=False)
-        print(f"Send data published: {'SUCCESS' if published else 'FAILED'}")
+        status = "OK" if published else "FAIL"
+        print(
+            f"[TX] pin={self.pin} name={self.name} value={value} "
+            f"-> backend {status}"
+        )
         return published
 
     def _publish(self, topic: str, payload: dict, retain: bool) -> bool:

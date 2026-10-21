@@ -72,6 +72,10 @@ class Receive:
                 float_value = max(self.min, min(self.max, float_value))
             self.entry_point.value = float_value
             result["newState"] = float_value
+            print(
+                f"[RX] pin={self.pin} name={self.name} value={float_value} "
+                f"<- backend"
+            )
             return True
 
         if self.type == "integer":
@@ -80,6 +84,10 @@ class Receive:
                 int_value = int(max(self.min, min(self.max, int_value)))
             self.entry_point.value = int_value
             result["newState"] = int_value
+            print(
+                f"[RX] pin={self.pin} name={self.name} value={int_value} "
+                f"<- backend"
+            )
             return True
 
         if self.type == "boolean":
@@ -87,13 +95,20 @@ class Receive:
             bool_value = 1.0 if str_value in ("on", "true", "1") else 0.0
             self.entry_point.value = bool_value
             result["newState"] = str(value)
+            print(
+                f"[RX] pin={self.pin} name={self.name} value={str_value} "
+                f"(truth={bool_value}) <- backend"
+            )
             return True
 
         if self.type == "string":
             str_value = str(value)
             self.entry_point.value = str_value
-            print(f"String control {self.pin} = {str_value}")
             result["newState"] = str_value
+            print(
+                f"[RX] pin={self.pin} name={self.name} value={str_value} "
+                f"<- backend"
+            )
             return True
 
         return False

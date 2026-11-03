@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iotfiy"
-version = "1.0.0"
+version = "1.0.1"
 description = "IOTFIY MQTT gateway client for Raspberry Pi 3/4/5"
 requires-python = ">=3.9"
 authors = [{ name = "Iotfiy Solutions", email = "iotfiy.solution@gmail.com" }]

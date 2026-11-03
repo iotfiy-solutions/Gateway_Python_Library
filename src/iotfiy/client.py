@@ -5,14 +5,21 @@ from __future__ import annotations
 import json
 import socket
 import time
-from typing import List, Optional
+from typing import Any, List, Optional, Tuple
 
 import paho.mqtt.client as mqtt
 
 from .device_config import DeviceConfig
 from .receive import Receive
-from .ref import Ref
-from .send import Send
+from .send import Send, infer_type, is_binding
+
+# Fixed IOTFIY gateway MQTT settings (same as Arduino library)
+_MQTT_SERVER = "gateway.iotfiysolutions.com"
+_MQTT_PORT = 1883
+_MQTT_USERNAME = "mqttuser"
+_MQTT_PASSWORD = "Growmore12345@"
+
+_KNOWN_TYPES = frozenset({"float", "integer", "boolean", "string"})
 
 
 class IOTFIYManager:
@@ -23,54 +30,42 @@ class IOTFIYManager:
         self._sends: List[Send] = []
         self._receives: List[Receive] = []
         self._config = DeviceConfig()
-        self._lwt_enabled = False
         self._client: Optional[mqtt.Client] = None
+        self._last_wifi_ok = False
+        self._last_mqtt_ok = False
+        self._status_initialized = False
 
     def config_obj(self) -> DeviceConfig:
         """Access underlying DeviceConfig (Arduino: config())."""
         return self._config
 
-    def enable_lwt(self, enabled: bool = True) -> None:
-        self._lwt_enabled = enabled
-        state = "ENABLED (offline on disconnect)" if enabled else "disabled"
-        print(f"MQTT LWT {state}")
+    def config(self, ssid: str, password: str, device_id: str) -> None:
+        """WiFi + device id only. MQTT broker/auth/LWT are built into the library.
 
-    def config(
-        self,
-        ssid: str,
-        password: str,
-        mqtt_server: str,
-        mqtt_client_id: str,
-        device_id: str,
-        mqtt_port: int = 1883,
-        mqtt_username: str = "",
-        mqtt_password: str = "",
-    ) -> None:
-        """Same signature as Arduino IOTFIY.config(...).
-
-        On Raspberry Pi, WiFi is normally managed by the OS. ``ssid`` /
-        ``password`` are kept for API compatibility; MQTT settings are required.
+        ``device_id`` may be plain or Base64 (decoded internally). It is also
+        used as the MQTT client id. On Raspberry Pi, OS manages Wi-Fi; ssid /
+        password are kept for API compatibility with Arduino.
         """
-        self._config.ssid(ssid).password(password).server(mqtt_server).port(
-            mqtt_port
-        ).client_id(mqtt_client_id).device_id(device_id).mqtt_username(
-            mqtt_username
-        ).mqtt_password(mqtt_password)
+        self._config.ssid(ssid).password(password).server(_MQTT_SERVER).port(
+            _MQTT_PORT
+        ).device_id(device_id).mqtt_username(_MQTT_USERNAME).mqtt_password(
+            _MQTT_PASSWORD
+        )
 
     def begin(self) -> None:
         if not self._config.is_valid():
             raise ValueError(
-                "IOTFIY config incomplete - set mqtt_server, client_id, device_id"
+                "IOTFIY config incomplete - call config(ssid, password, device_id)"
             )
 
-        # paho-mqtt 2.x uses CallbackAPIVersion; 1.x does not.
+        client_id = self._config.get_mqtt_client_id
         try:
             self._client = mqtt.Client(
                 mqtt.CallbackAPIVersion.VERSION1,
-                client_id=self._config.get_mqtt_client_id,
+                client_id=client_id,
             )
         except (AttributeError, TypeError):
-            self._client = mqtt.Client(client_id=self._config.get_mqtt_client_id)
+            self._client = mqtt.Client(client_id=client_id)
 
         self._client.on_message = self._on_message
         self._client.on_disconnect = self._on_disconnect
@@ -81,19 +76,19 @@ class IOTFIYManager:
                 self._config.get_mqtt_password,
             )
 
-        if self._lwt_enabled:
-            will_payload = json.dumps(
-                {
-                    "status": "offline",
-                    "deviceId": self._config.get_device_id,
-                }
-            )
-            self._client.will_set(
-                self._config.get_status_topic(),
-                payload=will_payload,
-                qos=1,
-                retain=True,
-            )
+        # LWT always enabled (not user-configurable)
+        will_payload = json.dumps(
+            {
+                "status": "offline",
+                "deviceId": self._config.get_device_id,
+            }
+        )
+        self._client.will_set(
+            self._config.get_status_topic(),
+            payload=will_payload,
+            qos=1,
+            retain=True,
+        )
 
         self._bind_client_to_capabilities()
 
@@ -120,6 +115,29 @@ class IOTFIYManager:
         self._publish(self._config.get_status_topic(), end, retain=False)
 
     def launch(self) -> None:
+        """Maintain network + MQTT, process commands, publish changed write() values."""
+        wifi_ok = self._check_and_reconnect_wifi()
+
+        if wifi_ok and not self.is_mqtt_connected():
+            self._reconnect_mqtt()
+
+        if self.is_mqtt_connected():
+            self._process_mqtt_messages()
+
+        mqtt_ok = self.is_mqtt_connected()
+        if (
+            not self._status_initialized
+            or wifi_ok != self._last_wifi_ok
+            or mqtt_ok != self._last_mqtt_ok
+        ):
+            self._print_connection_status(wifi_ok, mqtt_ok)
+            self._last_wifi_ok = wifi_ok
+            self._last_mqtt_ok = mqtt_ok
+            self._status_initialized = True
+
+        if not mqtt_ok:
+            return
+
         for send in self._sends:
             send.publish_data()
 
@@ -143,10 +161,140 @@ class IOTFIYManager:
             "deviceId": self._config.get_device_id,
             "data": {name: value, pin: value},
         }
-        print(f"String output {pin}={value}")
-        return self._publish(self._config.get_data_topic(), data, retain=False)
+        topic = self._config.get_data_topic()
+        print(f"String output {pin}={value} -> {topic}")
+        return self._publish(topic, data, retain=False)
 
-    def reconnect_mqtt(self) -> bool:
+    def is_mqtt_connected(self) -> bool:
+        return bool(self._client and self._client.is_connected())
+
+    def write(self, *args: Any) -> Optional[Send]:
+        """Register an output. Type inferred from the variable; name optional.
+
+        Forms (Arduino-compatible)::
+            write(pin, var)
+            write(pin, var, min, max)
+            write(name, pin, var)
+            write(name, pin, var, min, max)
+            write(name, type, pin, var)
+            write(name, type, pin, var, min, max)
+
+        ``var`` must be a one-element list (mutable) e.g. ``sensor = [0.0]``.
+        """
+        if len(self._sends) >= self.MAX_SENDS:
+            return None
+
+        name, type_, pin, var, min_v, max_v = self._parse_capability_args(
+            args, "write"
+        )
+        if type_ is None:
+            type_ = infer_type(var)
+        if not name:
+            name = pin
+
+        send = Send(
+            name,
+            type_,
+            pin,
+            var,
+            self._client,
+            self._config,
+            min_v,
+            max_v,
+        )
+        self._sends.append(send)
+        self._bind_client_to_capabilities()
+        return send
+
+    def read(self, *args: Any) -> Optional[Receive]:
+        """Register a control. Type inferred from the variable; name optional.
+
+        Forms (Arduino-compatible)::
+            read(pin, var)
+            read(pin, var, min, max)
+            read(name, pin, var)
+            read(name, pin, var, min, max)
+            read(name, type, pin, var)
+            read(name, type, pin, var, min, max)
+
+        ``var`` must be a one-element list (mutable) e.g. ``control = [0.0]``.
+        """
+        if len(self._receives) >= self.MAX_RECEIVES:
+            return None
+
+        name, type_, pin, var, min_v, max_v = self._parse_capability_args(
+            args, "read"
+        )
+        if type_ is None:
+            type_ = infer_type(var)
+        if not name:
+            name = pin
+
+        receive = Receive(
+            name,
+            type_,
+            pin,
+            var,
+            self._client,
+            self._config,
+            min_v,
+            max_v,
+        )
+        self._receives.append(receive)
+        self._bind_client_to_capabilities()
+        return receive
+
+    @staticmethod
+    def _parse_capability_args(
+        args: Tuple[Any, ...], label: str
+    ) -> Tuple[Optional[str], Optional[str], str, Any, Optional[float], Optional[float]]:
+        if len(args) < 2:
+            raise TypeError(f"{label}() needs at least pin and variable")
+
+        # Find binding from the end (before optional min/max numbers)
+        # Patterns end with: var | var, min, max
+        binding_index = None
+        min_v: Optional[float] = None
+        max_v: Optional[float] = None
+
+        if len(args) >= 4 and is_binding(args[-3]):
+            # ..., var, min, max
+            if not isinstance(args[-2], (int, float)) or not isinstance(
+                args[-1], (int, float)
+            ):
+                raise TypeError(f"{label}() min/max must be numbers")
+            binding_index = len(args) - 3
+            min_v = float(args[-2])
+            max_v = float(args[-1])
+        elif is_binding(args[-1]):
+            binding_index = len(args) - 1
+        else:
+            raise TypeError(
+                f"{label}() variable must be a one-element list, e.g. sensor = [0.0]"
+            )
+
+        var = args[binding_index]
+        head = args[:binding_index]
+
+        if len(head) == 1:
+            # pin, var
+            return None, None, str(head[0]), var, min_v, max_v
+        if len(head) == 2:
+            # name, pin, var
+            return str(head[0]), None, str(head[1]), var, min_v, max_v
+        if len(head) == 3:
+            # name, type, pin, var
+            name, type_, pin = str(head[0]), str(head[1]), str(head[2])
+            if type_ not in _KNOWN_TYPES:
+                raise TypeError(
+                    f"{label}() unknown type {type_!r}; "
+                    f"expected one of {sorted(_KNOWN_TYPES)}"
+                )
+            return name, type_, pin, var, min_v, max_v
+
+        raise TypeError(f"{label}() invalid arguments: {args!r}")
+
+    def _reconnect_mqtt(self) -> bool:
         if self._client is None:
             self.begin()
 
@@ -162,15 +310,17 @@ class IOTFIYManager:
                     self._config.get_mqtt_port,
                     keepalive=60,
                 )
-                # Give the network stack a moment, then poll until connected.
                 deadline = time.time() + 8
                 while time.time() < deadline and not self._client.is_connected():
                     self._client.loop(timeout=0.2)
 
                 if self._client.is_connected():
                     print("connected!")
-                    if self._lwt_enabled:
-                        print(f"LWT registered on {self._config.get_status_topic()}")
+                    print(f"LWT registered on {self._config.get_status_topic()}")
+                    print(f"Device ID: {self._config.get_device_id}")
+
+                    for send in self._sends:
+                        send.reset_publish_state()
 
                     self._client.subscribe(self._config.get_commands_topic())
                     status = {
@@ -192,12 +342,12 @@ class IOTFIYManager:
 
         return False
 
-    def check_and_reconnect_wifi(self) -> bool:
-        """On Pi, verify network path to the MQTT broker (OS manages Wi-Fi)."""
+    def _check_and_reconnect_wifi(self) -> bool:
+        """On Pi, verify TCP path to the MQTT broker (OS manages Wi-Fi)."""
         host = self._config.get_mqtt_server
         port = self._config.get_mqtt_port
         if not host:
-            print("WiFi/network check failed: MQTT server not configured")
+            print("Network check failed: MQTT server not configured")
             return False
 
         try:
@@ -207,69 +357,16 @@ class IOTFIYManager:
             print("Network unreachable to MQTT broker. Will retry...")
             return False
 
-    def is_mqtt_connected(self) -> bool:
-        return bool(self._client and self._client.is_connected())
-
-    def process_mqtt_messages(self) -> None:
+    def _process_mqtt_messages(self) -> None:
         if self._client is not None:
             self._client.loop(timeout=0.05)
 
-    def write(
-        self,
-        name: str,
-        type_: str,
-        pin: str,
-        data_source: Ref,
-        min_value: Optional[float] = None,
-        max_value: Optional[float] = None,
-    ) -> Optional[Send]:
-        if len(self._sends) >= self.MAX_SENDS:
-            return None
-        if not isinstance(data_source, Ref):
-            raise TypeError("write() expects an iotfiy.Ref for data_source")
-
-        send = Send(
-            name,
-            type_,
-            pin,
-            data_source,
-            self._client,
-            self._config,
-            min_value,
-            max_value,
-        )
-        # Client may be created later in begin(); keep reference alive.
-        self._sends.append(send)
-        self._bind_client_to_capabilities()
-        return send
-
-    def read(
-        self,
-        name: str,
-        type_: str,
-        pin: str,
-        entry_point: Ref,
-        min_value: Optional[float] = None,
-        max_value: Optional[float] = None,
-    ) -> Optional[Receive]:
-        if len(self._receives) >= self.MAX_RECEIVES:
-            return None
-        if not isinstance(entry_point, Ref):
-            raise TypeError("read() expects an iotfiy.Ref for entry_point")
-
-        receive = Receive(
-            name,
-            type_,
-            pin,
-            entry_point,
-            self._client,
-            self._config,
-            min_value,
-            max_value,
-        )
-        self._receives.append(receive)
-        self._bind_client_to_capabilities()
-        return receive
+    def _print_connection_status(self, wifi_ok: bool, mqtt_ok: bool) -> None:
+        if wifi_ok:
+            print("WiFi: connected (MQTT host reachable)")
+        else:
+            print("WiFi: not connected")
+        print(f"MQTT: {'connected' if mqtt_ok else 'not connected'}")
 
     def _bind_client_to_capabilities(self) -> None:
         if self._client is None:
@@ -285,6 +382,10 @@ class IOTFIYManager:
         assert self._client is not None
         try:
             info = self._client.publish(topic, json.dumps(payload), retain=retain)
+            try:
+                self._client.loop(timeout=0.05)
+            except Exception:
+                pass
             return info.rc == 0
         except Exception as exc:
             print(f"MQTT publish error: {exc}")
@@ -338,7 +439,7 @@ class IOTFIYManager:
                     break
 
         if target is not None:
-            result = {}
+            result: dict = {}
             success = target.handle_command(value, result)
             response = {
                 "status": "success" if success else "error",

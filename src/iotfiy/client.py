@@ -13,7 +13,6 @@ from .device_config import DeviceConfig
 from .receive import Receive
 from .send import Send, infer_type, is_binding
 
-# Fixed IOTFIY gateway MQTT settings (same as Arduino library)
 _MQTT_SERVER = "gateway.iotfiysolutions.com"
 _MQTT_PORT = 1883
 _MQTT_USERNAME = "mqttuser"
@@ -34,23 +33,37 @@ class IOTFIYManager:
         self._last_wifi_ok = False
         self._last_mqtt_ok = False
         self._status_initialized = False
+        self._last_data_publish_ms = 0
 
-    def config_obj(self) -> DeviceConfig:
-        """Access underlying DeviceConfig (Arduino: config())."""
-        return self._config
+    def config(
+        self,
+        ssid: Optional[str] = None,
+        password: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ):
+        """Arduino-compatible config.
 
-    def config(self, ssid: str, password: str, device_id: str) -> None:
-        """WiFi + device id only. MQTT broker/auth/LWT are built into the library.
+        - ``config()`` → returns DeviceConfig
+        - ``config(ssid, password, device_id)`` → set WiFi + device id
 
-        ``device_id`` may be plain or Base64 (decoded internally). It is also
-        used as the MQTT client id. On Raspberry Pi, OS manages Wi-Fi; ssid /
-        password are kept for API compatibility with Arduino.
+        MQTT broker/auth/LWT are built into the library. ``device_id`` may be
+        plain or Base64. On Raspberry Pi, OS manages Wi-Fi; ssid/password are
+        kept for API compatibility with Arduino.
         """
+        if ssid is None and password is None and device_id is None:
+            return self._config
+
+        if ssid is None or password is None or device_id is None:
+            raise TypeError(
+                "config(ssid, password, device_id) requires all three arguments"
+            )
+
         self._config.ssid(ssid).password(password).server(_MQTT_SERVER).port(
             _MQTT_PORT
         ).device_id(device_id).mqtt_username(_MQTT_USERNAME).mqtt_password(
             _MQTT_PASSWORD
         )
+        return None
 
     def begin(self) -> None:
         if not self._config.is_valid():
@@ -114,17 +127,21 @@ class IOTFIYManager:
         }
         self._publish(self._config.get_status_topic(), end, retain=False)
 
-    def launch(self) -> None:
-        """Maintain network + MQTT, process commands, publish changed write() values."""
+    def launch(self, interval_ms: int = 0) -> None:
+        """Maintain network + MQTT, process commands, publish write() values.
+
+        ``interval_ms == 0`` (default): publish on change.
+        ``interval_ms > 0``: publish current write values every interval_ms ms.
+        """
         wifi_ok = self._check_and_reconnect_wifi()
 
-        if wifi_ok and not self.is_mqtt_connected():
+        if wifi_ok and not self.isMQTTConnected():
             self._reconnect_mqtt()
 
-        if self.is_mqtt_connected():
+        if self.isMQTTConnected():
             self._process_mqtt_messages()
 
-        mqtt_ok = self.is_mqtt_connected()
+        mqtt_ok = self.isMQTTConnected()
         if (
             not self._status_initialized
             or wifi_ok != self._last_wifi_ok
@@ -138,11 +155,25 @@ class IOTFIYManager:
         if not mqtt_ok:
             return
 
-        for send in self._sends:
-            send.publish_data()
+        if interval_ms <= 0:
+            for send in self._sends:
+                send.publish_data()
+            return
 
-    def publish_string_output(self, name: str, pin: str, value: str) -> bool:
-        if not self.is_mqtt_connected():
+        now_ms = int(time.time() * 1000)
+        if self._last_data_publish_ms == 0:
+            self._last_data_publish_ms = now_ms
+            return
+        if (now_ms - self._last_data_publish_ms) < interval_ms:
+            return
+
+        self._last_data_publish_ms = now_ms
+        for send in self._sends:
+            send.publish_data(force=True)
+
+    def publishStringOutput(self, name: str, pin: str, value: str) -> bool:
+        """Send a string output. Not via write()."""
+        if not self.isMQTTConnected():
             return False
 
         cap = {
@@ -165,21 +196,30 @@ class IOTFIYManager:
         print(f"String output {pin}={value} -> {topic}")
         return self._publish(topic, data, retain=False)
 
-    def is_mqtt_connected(self) -> bool:
+    def isMQTTConnected(self) -> bool:
         return bool(self._client and self._client.is_connected())
 
-    def write(self, *args: Any) -> Optional[Send]:
+    def write(self, *args: Any, store: bool = False) -> Optional[Send]:
         """Register an output. Type inferred from the variable; name optional.
 
         Forms (Arduino-compatible)::
             write(pin, var)
+            write(pin, var, store=False)
+            write(pin, var, store=True)
             write(pin, var, min, max)
+            write(pin, var, min, max, store=True)
             write(name, pin, var)
+            write(name, pin, var, store=True)
             write(name, pin, var, min, max)
+            write(name, pin, var, min, max, store=True)
             write(name, type, pin, var)
+            write(name, type, pin, var, store=True)
             write(name, type, pin, var, min, max)
+            write(name, type, pin, var, min, max, store=True)
 
+        ``store``: False (default) = live only; True = also InfluxDB history.
         ``var`` must be a one-element list (mutable) e.g. ``sensor = [0.0]``.
+        Strings are not allowed here — use ``publishStringOutput(name, pin, value)``.
         """
         if len(self._sends) >= self.MAX_SENDS:
             return None
@@ -189,6 +229,11 @@ class IOTFIYManager:
         )
         if type_ is None:
             type_ = infer_type(var)
+        if type_ == "string":
+            raise TypeError(
+                "write() does not accept string. "
+                "Use publishStringOutput(name, pin, value) instead."
+            )
         if not name:
             name = pin
 
@@ -202,6 +247,7 @@ class IOTFIYManager:
             min_v,
             max_v,
         )
+        send.set_store(store)
         self._sends.append(send)
         self._bind_client_to_capabilities()
         return send
@@ -377,7 +423,7 @@ class IOTFIYManager:
             receive._client = self._client
 
     def _publish(self, topic: str, payload: dict, retain: bool) -> bool:
-        if not self.is_mqtt_connected():
+        if not self.isMQTTConnected():
             return False
         assert self._client is not None
         try:

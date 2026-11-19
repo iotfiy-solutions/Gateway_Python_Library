@@ -70,6 +70,7 @@ class Send:
         self.default_delay = 0.05
         self._has_last_published = False
         self._last_published_value: Optional[float] = None
+        self.store_historical = False
 
     def get_name(self) -> str:
         return self.name
@@ -88,6 +89,9 @@ class Send:
 
     def set_delay(self, ms: int) -> None:
         self.default_delay = max(0, ms) / 1000.0
+
+    def set_store(self, store: bool) -> None:
+        self.store_historical = bool(store)
 
     def reset_publish_state(self) -> None:
         self._has_last_published = False
@@ -108,7 +112,7 @@ class Send:
         time.sleep(self.default_delay)
         return published
 
-    def publish_data(self) -> bool:
+    def publish_data(self, force: bool = False) -> bool:
         try:
             raw = read_binding(self.exit_point)
             value = float(raw) if not isinstance(raw, str) else 0.0
@@ -124,7 +128,11 @@ class Send:
                 value = self.max
                 write_binding(self.exit_point, self._typed_store(value))
 
-        if self._has_last_published and value == self._last_published_value:
+        if (
+            not force
+            and self._has_last_published
+            and value == self._last_published_value
+        ):
             return True
 
         if not self.is_registered:
@@ -147,6 +155,7 @@ class Send:
         payload = {
             "type": "output",
             "deviceId": self._config.get_device_id,
+            "store": self.store_historical,
             "data": data,
         }
         topic = self._config.get_data_topic()
